@@ -518,68 +518,167 @@ class NonTerminalError(Exception):
 #             logger.error(f"Failed to parse API response: {e}")
 #             return {"error": "Invalid JSON response"}
 
+# class OllamaClient:
+#     def __init__(self, base_url, model, temperature=0.3, top_p=0.95, timeout=60):
+#         self.base_url = base_url
+#         self.model = model
+#         self.temperature = temperature
+#         self.top_p = top_p
+#         self.timeout = timeout
+
+#     def send_message(self, messages):
+#         """
+#         Sends a message to the Ollama API and returns the full JSON response.
+#         """
+#         payload = {
+#             "model": self.model,
+#             "messages": messages,
+#             "stream": False
+#         }
+        
+#         try:
+#             response = requests.post(
+#                 self.base_url,
+#                 json=payload,
+#                 timeout=self.timeout
+#             )
+#             response.raise_for_status()
+            
+#             # Get the raw response
+#             response_json = response.json()
+#             logger.debug(f"Ollama API Response: {response_json}")
+
+#             # If we have a message with content
+#             if 'message' in response_json and 'content' in response_json['message']:
+#                 content = response_json['message']['content']
+                
+#                 # Try to parse content as JSON
+#                 try:
+#                     parsed_content = json.loads(content)
+#                     if 'action' in parsed_content and 'cognitive_state' not in parsed_content:
+#                         # Add cognitive_state if missing but action exists
+#                         parsed_content['cognitive_state'] = {
+#                             'goals': 'Continue current interaction',
+#                             'attention': 'Current conversation',
+#                             'emotions': 'Engaged'
+#                         }
+#                         return {'message': {'content': json.dumps(parsed_content)}}
+#                 except:
+#                     pass  # If parsing fails, return original response
+                
+#                 # Return the raw response
+#                 return response_json
+
+#             logger.error(f"Unexpected response format: {response_json}")
+#             return response_json
+
+#         except requests.exceptions.RequestException as e:
+#             logger.error(f"Error communicating with Ollama API: {e}")
+#             return {"error": str(e)}
+            
+#         except ValueError as e:
+#             logger.error(f"Failed to parse API response: {e}")
+#             return {"error": "Invalid JSON response"}
 class OllamaClient:
-    def __init__(self, base_url, model, temperature=0.3, top_p=0.95, timeout=60):
-        self.base_url = base_url
+    def __init__(self, base_url, model=None, temperature=0.7, top_p=0.95, timeout=60):
+        self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
         self.model = model
         self.temperature = temperature
         self.top_p = top_p
         self.timeout = timeout
+        
+        # Get config to find the correct endpoint
+        from tinytroupe import utils
+        config = utils.read_config_file()
+        self.endpoint = config["Ollama"].get("ENDPOINT", "/api/chat").lstrip('/')
+        if not self.model:
+            self.model = config["Ollama"].get("MODEL", "llama3.1")
 
-    def send_message(self, messages):
+    def send_message(self, messages, response_format=None, max_tokens=None, temperature=None, top_p=None):
         """
-        Sends a message to the Ollama API and returns the full JSON response.
+        Sends messages to Ollama and processes the response.
         """
+        # Construct the full URL correctly
+        url = f"{self.base_url}/{self.endpoint}"
+        
         payload = {
             "model": self.model,
             "messages": messages,
+            "temperature": temperature or self.temperature,
+            "top_p": top_p or self.top_p,
             "stream": False
         }
         
+        logger.info(f"Sending request to Ollama at: {url}")
+        logger.debug(f"Payload: {payload}")
+
         try:
             response = requests.post(
-                self.base_url,
+                url,
                 json=payload,
                 timeout=self.timeout
             )
             response.raise_for_status()
             
-            # Get the raw response
             response_json = response.json()
-            logger.debug(f"Ollama API Response: {response_json}")
-
-            # If we have a message with content
-            if 'message' in response_json and 'content' in response_json['message']:
-                content = response_json['message']['content']
+            logger.debug(f"Ollama response: {response_json}")
+            
+            if response_format and hasattr(response_format, '__name__') and response_format.__name__ == "CognitiveActionModel":
+                # Create properly formatted response for TinyTroupe's cognitive action model
+                content = response_json.get("message", {}).get("content", "")
                 
-                # Try to parse content as JSON
-                try:
-                    parsed_content = json.loads(content)
-                    if 'action' in parsed_content and 'cognitive_state' not in parsed_content:
-                        # Add cognitive_state if missing but action exists
-                        parsed_content['cognitive_state'] = {
-                            'goals': 'Continue current interaction',
-                            'attention': 'Current conversation',
-                            'emotions': 'Engaged'
+                # Format response with required cognitive state
+                cognitive_response = {
+                    "cognitive_state": {
+                        "attention": "focused",
+                        "emotion": "neutral",
+                        "thoughts": "Processing the conversation",
+                        "goals": ["Respond appropriately to the situation"]
+                    },
+                    "actions": [
+                        {
+                            "action_type": "talk",
+                            "target": None,
+                            "content": content
                         }
-                        return {'message': {'content': json.dumps(parsed_content)}}
-                except:
-                    pass  # If parsing fails, return original response
+                    ]
+                }
                 
-                # Return the raw response
-                return response_json
-
-            logger.error(f"Unexpected response format: {response_json}")
-            return response_json
-
+                return {
+                    "role": "assistant",
+                    "content": json.dumps(cognitive_response)
+                }
+            
+            # For standard responses
+            return {
+                "role": "assistant",
+                "content": response_json.get("message", {}).get("content", "")
+            }
+            
         except requests.exceptions.RequestException as e:
             logger.error(f"Error communicating with Ollama API: {e}")
-            return {"error": str(e)}
             
-        except ValueError as e:
-            logger.error(f"Failed to parse API response: {e}")
-            return {"error": "Invalid JSON response"}
-
+            # Return a properly formatted error response with cognitive state
+            error_response = {
+                "cognitive_state": {
+                    "attention": "error",
+                    "emotion": "concerned",
+                    "thoughts": f"Technical difficulties: {str(e)}",
+                    "goals": ["Resolve connection issues"]
+                },
+                "actions": [
+                    {
+                        "action_type": "talk",
+                        "target": None,
+                        "content": "I'm having trouble processing your request due to technical issues."
+                    }
+                ]
+            }
+            
+            return {
+                "role": "assistant",
+                "content": json.dumps(error_response)
+            }
 
 ###########################################################################
 # Clients registry

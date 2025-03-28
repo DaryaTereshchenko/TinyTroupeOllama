@@ -424,20 +424,71 @@ class TinyPerson(JsonSerializableRegistry):
         # Occasionally, the model will return JSON missing important keys, so we just ask it to try again
         @repeat_on_error(retries=5, exceptions=[KeyError])
         def aux_act_once():
-            # A quick thought before the action. This seems to help with better model responses, perhaps because
-            # it interleaves user with assistant messages.
-            self.think("I will now act a bit, and then issue DONE.")
-
-          
+            # Modified thought that better guides the agent about how actions work
+            if len(contents) == 0:
+                self.think("I will now respond to what I've heard. After I've completed my response, I should issue a DONE action.")
+            elif len(contents) >= 3:
+                self.think("I've already performed several actions. I should consider if I've completed my response and issue a DONE action.")
+            else:
+                self.think("I will continue my response if needed, then issue DONE when I'm finished responding.")
+   
+            # self.think("I will now act a bit, and then issue DONE.")
+            
+            # Get the response from model
             role, content = self._produce_message()
-
+            
+            # Handle string content or ensure proper structure
+            if isinstance(content, str):
+                try:
+                    import json
+                    content = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    # If parsing fails, create a properly formatted structure
+                    logger.warning(f"[{self.name}] Failed to parse LLM response as JSON, creating default cognitive state")
+                    content = {
+                        "cognitive_state": {
+                            "attention": "focused",
+                            "emotions": ["neutral"],
+                            "goals": ["Complete the current interaction"]
+                        },
+                        "action": {
+                            "type": "talk",
+                            "target": None,
+                            "content": content if isinstance(content, str) else "I need to process this situation."
+                        }
+                    }
+            
+            # Ensure required fields exist
+            if "cognitive_state" not in content:
+                logger.warning(f"[{self.name}] Response missing cognitive_state, adding default")
+                content["cognitive_state"] = {
+                    "attention": "focused",
+                    "emotions": ["neutral"],
+                    "goals": ["Complete the current interaction"]
+                }
+            
+            if "action" not in content:
+                logger.warning(f"[{self.name}] Response missing action, adding default")
+                content["action"] = {
+                    "type": "talk",
+                    "target": None,
+                    "content": "I'm considering what to do next."
+                }
+            
             self.episodic_memory.store({'role': role, 'content': content, 'simulation_timestamp': self.iso_datetime()})
-
+            
             cognitive_state = content["cognitive_state"]
-
-
+            
+            # Ensure cognitive_state has required fields
+            if "goals" not in cognitive_state:
+                cognitive_state["goals"] = ["Complete the current interaction"]
+            if "attention" not in cognitive_state:
+                cognitive_state["attention"] = "focused"
+            if "emotions" not in cognitive_state:
+                cognitive_state["emotions"] = ["neutral"]
+            
             action = content['action']
-
+            
             self._actions_buffer.append(action)
             self._update_cognitive_state(goals=cognitive_state['goals'],
                                         attention=cognitive_state['attention'],
@@ -451,7 +502,7 @@ class TinyPerson(JsonSerializableRegistry):
             # Some actions induce an immediate stimulus or other side-effects. We need to process them here, by means of the mental faculties.
             #
             for faculty in self._mental_faculties:
-                faculty.process_action(self, action)             
+                faculty.process_action(self, action)      
             
 
         #
@@ -610,17 +661,50 @@ class TinyPerson(JsonSerializableRegistry):
     def listen_and_act(
         self,
         speech,
+        source: AgentOrWorld = None,
         return_actions=False,
         max_content_length=default["max_content_display_length"],
     ):
         """
         Convenience method that combines the `listen` and `act` methods.
+        
+        Args:
+            speech (str): The speech to listen to.
+            source (AgentOrWorld, optional): The source of the speech. Defaults to None.
+            return_actions (bool): Whether to return the actions performed. Defaults to False.
+            max_content_length (int): Maximum length of content to display. Defaults to configured value.
+            
+        Returns:
+            The agent itself if return_actions is False, otherwise the list of actions performed.
         """
-
-        self.listen(speech, max_content_length=max_content_length)
+        # Think first to explicitly indicate a response is expected
+        self.think(f"I need to respond to what was just said. I'll listen carefully and then respond appropriately.")
+        
+        # Pass the source to the listen method
+        self.listen(speech, source=source, max_content_length=max_content_length)
+        
+        # Act with a limited number of actions instead of until_done to avoid potential loops
+        # This will ensure the agent doesn't get stuck in an infinite loop
         return self.act(
-            return_actions=return_actions, max_content_length=max_content_length
+            until_done=True,  # We still want the agent to decide when it's done
+            n=None,
+            return_actions=return_actions, 
+            max_content_length=max_content_length
         )
+    # def listen_and_act(
+    #     self,
+    #     speech,
+    #     return_actions=False,
+    #     max_content_length=default["max_content_display_length"],
+    # ):
+    #     """
+    #     Convenience method that combines the `listen` and `act` methods.
+    #     """
+
+    #     self.listen(speech, max_content_length=max_content_length)
+    #     return self.act(
+    #         return_actions=return_actions, max_content_length=max_content_length
+    #     )
 
     @transactional
     def see_and_act(
@@ -749,6 +833,41 @@ class TinyPerson(JsonSerializableRegistry):
     #     logging.error(f"Raw response from model: {next_message}")
 
     #     return next_message["role"], utils.extract_json(next_message["content"])
+    # @transactional
+    # def _produce_message(self):
+    #     self.reset_prompt()
+
+    #     messages = [
+    #         {"role": msg["role"], "content": json.dumps(msg["content"])}
+    #         for msg in self.current_messages
+    #     ]
+
+    #     # logger.debug(f"[{self.name}] Sending messages to OpenAI API")
+    #     # logger.debug(f"[{self.name}] Last interaction: {messages[-1]}")
+
+    #     # Send message and get the full response
+    #     raw_response = openai_utils.client().send_message(messages)
+    #     # logger.debug(f"Raw response from model: {raw_response}")
+    #     # logging.error(f"Raw response from model: {raw_response}")
+
+    #     try:
+    #         # Extract the 'content' field from 'message' if present
+    #         next_message_content = raw_response.get("message", {}).get("content", "")
+
+    #         # Parse the content into JSON if it's a string
+    #         if isinstance(next_message_content, str):
+    #             content = utils.extract_json(next_message_content)
+    #         else:
+    #             content = next_message_content  # Already parsed
+
+    #         role = raw_response.get("action", {}).get("type", "assistant")
+    #         return role, content
+
+    #     except json.JSONDecodeError as e:
+    #         raise ValueError(f"Failed to parse JSON response content: {raw_response}") from e
+    #     except Exception as e:
+    #         raise ValueError(f"Unexpected response format: {raw_response}") from e
+
     @transactional
     def _produce_message(self):
         self.reset_prompt()
@@ -758,25 +877,25 @@ class TinyPerson(JsonSerializableRegistry):
             for msg in self.current_messages
         ]
 
-        # logger.debug(f"[{self.name}] Sending messages to OpenAI API")
-        # logger.debug(f"[{self.name}] Last interaction: {messages[-1]}")
-
-        # Send message and get the full response
         raw_response = openai_utils.client().send_message(messages)
-        # logger.debug(f"Raw response from model: {raw_response}")
-        # logging.error(f"Raw response from model: {raw_response}")
-
+        
         try:
-            # Extract the 'content' field from 'message' if present
-            next_message_content = raw_response.get("message", {}).get("content", "")
+            # Check if we got a standard OpenAI response or an Ollama response.
+            if "message" in raw_response:
+                next_message_content = raw_response.get("message", {}).get("content", "")
+                role = raw_response.get("action", {}).get("type", "assistant")
+            elif "content" in raw_response:
+                next_message_content = raw_response.get("content", "")
+                role = raw_response.get("role", "assistant")
+            else:
+                raise ValueError(f"Unexpected response format: {raw_response}")
 
             # Parse the content into JSON if it's a string
             if isinstance(next_message_content, str):
                 content = utils.extract_json(next_message_content)
             else:
-                content = next_message_content  # Already parsed
+                content = next_message_content
 
-            role = raw_response.get("action", {}).get("type", "assistant")
             return role, content
 
         except json.JSONDecodeError as e:
