@@ -294,7 +294,7 @@ def dedent(text: str) -> str:
 ################################################################################
 _config = None
 
-def read_config_file(use_cache=True, verbose=True) -> configparser.ConfigParser:
+def read_config_file(use_cache=True, verbose=False) -> configparser.ConfigParser:
     global _config
     if use_cache and _config is not None:
         # if we have a cached config and accept that, return it
