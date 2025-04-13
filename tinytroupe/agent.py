@@ -393,6 +393,102 @@ class TinyPerson(JsonSerializableRegistry):
             raise Exception(f"The mental faculty {faculty} is already present in the agent.")
         
         return self
+    
+    @transactional
+    def quick_talk(self, max_content_length=default["max_content_display_length"]):
+        """
+        Generates a final 'talk' response quickly using a simplified prompt.
+        This method integrates a brief hidden internal thinking step and then
+        constructs a prompt that includes the agent’s configuration details 
+        (e.g., age, nationality, occupation, personality traits).
+        
+        The prompt instructs the LLM not to repeat any redundant greetings or pleasantries that might have been generated before.
+        If the generated output does not contain a valid 'talk' action, it will try up to 2 additional times 
+        (3 total attempts) before forcing a default answer.
+        """
+        # 1. Build a summary of the agent’s configuration.
+        conf = self._configuration
+        persona_summary = f"My name is {conf.get('name', 'unknown')}."
+        if conf.get("age"):
+            persona_summary += f" I am {conf.get('age')} years old."
+        if conf.get("nationality"):
+            persona_summary += f" I am {conf.get('nationality')}."
+        if conf.get("occupation"):
+            persona_summary += f" I work as a {conf.get('occupation')}."
+        if conf.get("occupation_description"):
+            persona_summary += f" {conf.get('occupation_description')}"
+        if conf.get("routine"):
+            if isinstance(conf.get("routine"), list):
+                routines = " ".join(conf.get("routine"))
+            else:
+                routines = conf.get("routine")
+            persona_summary += f" My daily routine includes: {routines}."
+        if conf.get("personality_traits"):
+            traits = ", ".join([trait.get("trait", "") for trait in conf.get("personality_traits") if trait.get("trait")])
+            if traits:
+                persona_summary += f" My personality is characterized by: {traits}."
+        
+        # 2. Internal priming: execute a brief hidden thought step.
+        self.think("Internal priming: Finalizing response based on my configuration.")
+        # Filter out any non-user messages so that only user inputs remain.
+        self.current_messages = [msg for msg in self.current_messages if msg["role"] == "user"]
+        
+        # 3. Get the most recent user input.
+        user_input = ""
+        if self.current_messages:
+            user_input = self.current_messages[-1].get("content", "")
+        
+        # 4. Build the system prompt.
+        # Notice the extra instruction not to repeat any greetings or redundant statements.
+        simplified_prompt = (
+            f"Agent details: {persona_summary}\n"
+            "Please provide a concise, final answer as if you are talking directly to a human. "
+            "Do not output any internal chain-of-thought, reasoning steps, or repeated greetings that might have been provided previously. "
+            "Your reply must be in JSON format with an 'action' field, where 'type' is 'talk' and 'content' contains only the final answer.\n"
+            f"Conversation input: {user_input}"
+        )
+        
+        # 5. Build the message list: system prompt + user messages only.
+        messages = [{"role": "system", "content": simplified_prompt}]
+        messages.extend([{"role": msg["role"], "content": msg["content"]} for msg in self.current_messages])
+        
+        max_attempts = 3
+        output = None
+        for attempt in range(max_attempts):
+            raw_response = openai_utils.client().send_message(messages)
+            try:
+                if "content" in raw_response:
+                    response_content = raw_response["content"]
+                elif "message" in raw_response and "content" in raw_response["message"]:
+                    response_content = raw_response["message"]["content"]
+                else:
+                    response_content = ""
+                
+                output = utils.extract_json(response_content)
+                # Check if we have a valid talk action.
+                if "action" in output and output["action"].get("type", "").lower() == "talk":
+                    break  # Valid talk response obtained.
+                else:
+                    logging.debug(f"Attempt {attempt+1}: No valid 'talk' action in output; retrying...")
+            except Exception as e:
+                logging.error(f"Attempt {attempt+1}: quick_talk generation failed: {e}")
+        
+        # 6. If no valid 'talk' action, force a default answer.
+        if not (output and "action" in output and output["action"].get("type", "").lower() == "talk"):
+            content = output.get("content", "").strip() if output else ""
+            if not content:
+                content = "I'm sorry, I have no answer at the moment."
+            output = {"action": {"type": "talk", "content": content}}
+            logging.debug("Forcing default talk action after multiple attempts.")
+        
+        # 7. Store the final assistant response in episodic memory.
+        self.episodic_memory.store({
+            "role": "assistant",
+            "content": output,
+            "simulation_timestamp": self.iso_datetime()
+        })
+        
+        return output
 
     @transactional
     def act(
@@ -422,7 +518,7 @@ class TinyPerson(JsonSerializableRegistry):
 
         # Aux function to perform exactly one action.
         # Occasionally, the model will return JSON missing important keys, so we just ask it to try again
-        @repeat_on_error(retries=5, exceptions=[KeyError])
+        @repeat_on_error(retries=2, exceptions=[KeyError])
         def aux_act_once():
             # Modified thought that better guides the agent about how actions work
             if len(contents) == 0:
