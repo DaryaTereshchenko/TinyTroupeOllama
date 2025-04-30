@@ -210,7 +210,34 @@ def sanitize_dict(value: dict) -> dict:
     value = json.loads(tmp_str)
 
     # ensure that the dictionary is not too deeply nested
+    max_depth = 10  # A reasonable maximum depth to prevent stack overflows
+    value = _limit_dict_depth(value, max_depth)
+    
     return value
+
+def _limit_dict_depth(obj, max_depth, current_depth=0):
+    """
+    Helper function to limit the depth of a nested dictionary/list structure.
+    
+    Args:
+        obj: The object to check (dict, list, or other value)
+        max_depth: Maximum allowed nesting depth
+        current_depth: Current depth in the recursion
+        
+    Returns:
+        The object with nesting limited to max_depth
+    """
+    if current_depth >= max_depth:
+        if isinstance(obj, (dict, list)):
+            return "MAX_DEPTH_REACHED"
+        return obj
+    
+    if isinstance(obj, dict):
+        return {k: _limit_dict_depth(v, max_depth, current_depth + 1) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_limit_dict_depth(item, max_depth, current_depth + 1) for item in obj]
+    else:
+        return obj
     
     
 ################################################################################

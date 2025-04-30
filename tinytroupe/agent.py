@@ -399,14 +399,14 @@ class TinyPerson(JsonSerializableRegistry):
         """
         Generates a final 'talk' response quickly using a simplified prompt.
         This method integrates a brief hidden internal thinking step and then
-        constructs a prompt that includes the agent’s configuration details 
+        constructs a prompt that includes the agent's configuration details 
         (e.g., age, nationality, occupation, personality traits).
         
         The prompt instructs the LLM not to repeat any redundant greetings or pleasantries that might have been generated before.
         If the generated output does not contain a valid 'talk' action, it will try up to 2 additional times 
         (3 total attempts) before forcing a default answer.
         """
-        # 1. Build a summary of the agent’s configuration.
+        # 1. Build a summary of the agent's configuration.
         conf = self._configuration
         persona_summary = f"My name is {conf.get('name', 'unknown')}."
         if conf.get("age"):
@@ -431,12 +431,12 @@ class TinyPerson(JsonSerializableRegistry):
         # 2. Internal priming: execute a brief hidden thought step.
         self.think("Internal priming: Finalizing response based on my configuration.")
         # Filter out any non-user messages so that only user inputs remain.
-        self.current_messages = [msg for msg in self.current_messages if msg["role"] == "user"]
+        filtered_messages = [msg for msg in self.current_messages if msg["role"] == "user"]
         
         # 3. Get the most recent user input.
         user_input = ""
-        if self.current_messages:
-            user_input = self.current_messages[-1].get("content", "")
+        if filtered_messages:
+            user_input = filtered_messages[-1].get("content", "")
         
         # 4. Build the system prompt.
         # Notice the extra instruction not to repeat any greetings or redundant statements.
@@ -449,39 +449,64 @@ class TinyPerson(JsonSerializableRegistry):
         )
         
         # 5. Build the message list: system prompt + user messages only.
+        # Ensure we don't send complex objects that Ollama can't handle
         messages = [{"role": "system", "content": simplified_prompt}]
-        messages.extend([{"role": msg["role"], "content": msg["content"]} for msg in self.current_messages])
+        for msg in filtered_messages:
+            # Handle both string content and dictionary content for compatibility
+            if isinstance(msg["content"], dict):
+                # Extract the actual content from stimuli for Ollama compatibility
+                if "stimuli" in msg["content"]:
+                    stimuli_content = " ".join([s.get("content", "") for s in msg["content"]["stimuli"]])
+                    messages.append({"role": msg["role"], "content": stimuli_content})
+            else:
+                messages.append({"role": msg["role"], "content": msg["content"]})
         
         max_attempts = 3
         output = None
+        
         for attempt in range(max_attempts):
-            raw_response = openai_utils.client().send_message(messages)
             try:
-                if "content" in raw_response:
-                    response_content = raw_response["content"]
-                elif "message" in raw_response and "content" in raw_response["message"]:
-                    response_content = raw_response["message"]["content"]
-                else:
-                    response_content = ""
+                raw_response = openai_utils.client().send_message(messages)
+                logging.debug(f"Raw response from model: {raw_response}")
                 
-                output = utils.extract_json(response_content)
-                # Check if we have a valid talk action.
-                if "action" in output and output["action"].get("type", "").lower() == "talk":
-                    break  # Valid talk response obtained.
-                else:
-                    logging.debug(f"Attempt {attempt+1}: No valid 'talk' action in output; retrying...")
+                # Handle both OpenAI and Ollama response formats
+                response_content = ""
+                if isinstance(raw_response, dict):
+                    if "content" in raw_response:
+                        response_content = raw_response["content"]
+                    elif "message" in raw_response and "content" in raw_response["message"]:
+                        response_content = raw_response["message"]["content"]
+                elif isinstance(raw_response, str):
+                    # Direct string response from Ollama
+                    response_content = raw_response
+                
+                # Try to extract JSON from the response content
+                try:
+                    output = utils.extract_json(response_content)
+                    # Check if we have a valid talk action
+                    if "action" in output and output["action"].get("type", "").lower() == "talk":
+                        break  # Valid talk response obtained
+                    else:
+                        # If we get JSON but no talk action, create it
+                        content = output.get("content", response_content)
+                        if content:
+                            output = {"action": {"type": "talk", "content": content}}
+                            break
+                        logging.debug(f"Attempt {attempt+1}: No valid 'talk' action in output; retrying...")
+                except Exception as e:
+                    # If JSON extraction fails, use the raw text as content
+                    output = {"action": {"type": "talk", "content": response_content}}
+                    break
+                    
             except Exception as e:
                 logging.error(f"Attempt {attempt+1}: quick_talk generation failed: {e}")
         
-        # 6. If no valid 'talk' action, force a default answer.
-        if not (output and "action" in output and output["action"].get("type", "").lower() == "talk"):
-            content = output.get("content", "").strip() if output else ""
-            if not content:
-                content = "I'm sorry, I have no answer at the moment."
-            output = {"action": {"type": "talk", "content": content}}
+        # 6. If no valid output was generated, force a default answer
+        if not output:
+            output = {"action": {"type": "talk", "content": "I'm sorry, I have no answer at the moment."}}
             logging.debug("Forcing default talk action after multiple attempts.")
         
-        # 7. Store the final assistant response in episodic memory.
+        # 7. Store the final assistant response in episodic memory
         self.episodic_memory.store({
             "role": "assistant",
             "content": output,
@@ -907,62 +932,6 @@ class TinyPerson(JsonSerializableRegistry):
         """
         self._accessible_agents = []
         self._configuration["currently_accessible_agents"] = []
-
-    # @transactional
-    # def _produce_message(self):
-    #     # logger.debug(f"Current messages: {self.current_messages}")
-
-    #     # ensure we have the latest prompt (initial system message + selected messages from memory)
-    #     self.reset_prompt()
-
-    #     messages = [
-    #         {"role": msg["role"], "content": json.dumps(msg["content"])}
-    #         for msg in self.current_messages
-    #     ]
-
-    #     logger.debug(f"[{self.name}] Sending messages to OpenAI API")
-    #     logger.debug(f"[{self.name}] Last interaction: {messages[-1]}")
-
-    #     next_message = openai_utils.client().send_message(messages)
-
-    #     logger.debug(f"[{self.name}] Received message: {next_message}")
-    #     logging.error(f"Raw response from model: {next_message}")
-
-    #     return next_message["role"], utils.extract_json(next_message["content"])
-    # @transactional
-    # def _produce_message(self):
-    #     self.reset_prompt()
-
-    #     messages = [
-    #         {"role": msg["role"], "content": json.dumps(msg["content"])}
-    #         for msg in self.current_messages
-    #     ]
-
-    #     # logger.debug(f"[{self.name}] Sending messages to OpenAI API")
-    #     # logger.debug(f"[{self.name}] Last interaction: {messages[-1]}")
-
-    #     # Send message and get the full response
-    #     raw_response = openai_utils.client().send_message(messages)
-    #     # logger.debug(f"Raw response from model: {raw_response}")
-    #     # logging.error(f"Raw response from model: {raw_response}")
-
-    #     try:
-    #         # Extract the 'content' field from 'message' if present
-    #         next_message_content = raw_response.get("message", {}).get("content", "")
-
-    #         # Parse the content into JSON if it's a string
-    #         if isinstance(next_message_content, str):
-    #             content = utils.extract_json(next_message_content)
-    #         else:
-    #             content = next_message_content  # Already parsed
-
-    #         role = raw_response.get("action", {}).get("type", "assistant")
-    #         return role, content
-
-    #     except json.JSONDecodeError as e:
-    #         raise ValueError(f"Failed to parse JSON response content: {raw_response}") from e
-    #     except Exception as e:
-    #         raise ValueError(f"Unexpected response format: {raw_response}") from e
 
     @transactional
     def _produce_message(self):
@@ -1589,17 +1558,7 @@ class RecallFaculty(TinyMentalFaculty):
         prompt = \
           """
             - You try to RECALL information from your semantic/factual memory, so that you can have more relevant elements to think and talk about, whenever such an action would be likely
-                to enrich the current interaction. To do so, you must specify able "mental query" that is related to the things you've been thinking, listening and talking about.
-                Example:
-                ```
-                <THINK A>
-                <RECALL B, which is something related to A>
-                <THINK about A and B>
-                <TALK about A and B>
-                DONE
-                ```
-            - If you RECALL:
-                * you use a "mental query" that describe the elements you are looking for, you do not use a question. It is like a keyword-based search query.
+                to enrich the current interaction. To do so, you must specify able "mental query" that describe the elements you are looking for, you do not use a question. It is like a keyword-based search query.
                 For example, instead of "What are the symptoms of COVID-19?", you would use "COVID-19 symptoms".
                 * you use keywords likely to be found in the text you are looking for. For example, instead of "Brazil economic outlook", you would use "Brazil economy", "Brazil GPD", "Brazil inflation", etc.
             - It may take several tries of RECALL to get the relevant information you need. If you don't find what you are looking for, you can try again with a **very** different "mental query".
