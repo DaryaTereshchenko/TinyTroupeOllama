@@ -28,3 +28,24 @@ utils.start_logger(config)
 rich.jupyter.JUPYTER_HTML_FORMAT = \
     utils.inject_html_css_style_prefix(rich.jupyter.JUPYTER_HTML_FORMAT, "margin:0px;")
 
+"""TinyTroupe package initialization."""
+
+# Make all core modules available when importing the package
+from . import agent
+from . import factory
+from . import extraction
+from . import control
+
+# Explicitly import hardcoded_personas to make it available in the package
+try:
+    from . import hardcoded_personas
+except ImportError as e:
+    print(f"Warning: Failed to import hardcoded_personas: {e}")
+
+# Optional: For convenience, import commonly used functions directly
+# This allows imports like: from tinytroupe import get_random_persona
+from .hardcoded_personas import get_random_persona, get_all_personas
+
+# Package metadata
+__version__ = '0.1.0'
+

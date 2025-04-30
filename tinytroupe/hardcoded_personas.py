@@ -1,3 +1,5 @@
+"""Hard-coded personas for the TinyTroupe project."""
+
 import random
 from tinytroupe.agent import TinyPerson
 
