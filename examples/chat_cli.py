@@ -1,8 +1,12 @@
 import sys
+import os
+# ensure project root is on PYTHONPATH when running from examples/
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import random
 import logging
 from tinytroupe.agent import TinyPerson
-from hardcoded_personas import get_random_persona
+from tinytroupe.hardcoded_personas import get_random_persona
 from rich.console import Console
 from rich.panel import Panel
 from rich.pretty import pprint
